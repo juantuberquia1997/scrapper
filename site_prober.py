@@ -1,12 +1,18 @@
 """
 Supermu Discount Tracker
-Searches each product in PRODUCTS_TO_TRACK and reports which ones
-have active discounts or promotions.
+Searches each product in PRODUCTS_TO_TRACK, exports an Excel report,
+and sends it by email.
 """
 import re
 import time
 import random
 import urllib.parse
+import smtplib
+import os
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 
 import requests
 from bs4 import BeautifulSoup
@@ -15,12 +21,96 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 from datetime import datetime
 
-from supermu_scraper import PRODUCTS_TO_TRACK
+# ---------------------------------------------------------------------------
+# Email config  ← fill these in before enabling
+# ---------------------------------------------------------------------------
+ENABLE_EMAIL    = False                        # Set True once credentials are set
+SMTP_SERVER     = "smtp.gmail.com"
+SMTP_PORT       = 587
+SENDER_EMAIL    = "your_email@gmail.com"
+SENDER_PASSWORD = "your_app_password"          # Gmail App Password (not your login password)
+RECIPIENT_EMAIL = "recipient@example.com"
+
+# ---------------------------------------------------------------------------
+# Products to track
+# ---------------------------------------------------------------------------
+PRODUCTS_TO_TRACK = [
+    "CEBOLLA ROJA",
+    "PAPA CRIOLLA",
+    "GRANADILLA BOLSA EC",
+    "PAPA GRUESA 1U",
+    "MARACUYA",
+    "PLATANO VERDE",
+    "PAQUETE FRUVER LIMO",
+    "TOMATE DE ARBOL",
+    "AGUACATE PAPELILLO",
+    "GUINEO",
+    "MORA",
+    "FRIJOL VERDE DESGRA",
+    "BANANO CRIOLLO",
+    "TOMATE CHONTO",
+    "FRESA JUMBO BANDEJA",
+    "ARVEJA ZENU 2U 600G",
+    "EMPANADA MAFRY 760G",
+    "ACEITE CADA DIA 300",
+    "AREPA SUPERMU 15U 1",
+    "PANELA SAN JOAQUIN",
+    "ESPARCIBLE CAMPI 50",
+    "ACEITUNAS VERDES SE",
+    "HARINA TRIGO HAZ OR",
+    "ARROZ DIANA 1000 G",
+    "ARROZ DIANA 2500G P",
+    "ATUN VANCAMPS 160G",
+    "AZUCAR PROVIDENCIA",
+    "PASTA DORIA 250G CA",
+    "PASTA DORIA 250G CO",
+    "SAL REFISAL 1000G",
+    "HARINA MAIZ PAN 100",
+    "CHOCOLATE TESALIA 2",
+    "CALDO DONA GALLINA",
+    "MANI DULCE LA VAQUI",
+    "LENTEJA ABURRA 500G",
+    "CHOCOLATES M&M 47.9",
+    "CALDO RICOSTILLA 12",
+    "LECHE LA VAQUITA 6U",
+    "CERVEZA AGUILA 6U 1",
+    "SAL DE AJO BORNEO 1",
+    "SALSA MEXICAN ESTIL",
+    "GALLETA DUCALES NOE",
+    "GALLETA WAFER NOEL",
+    "GALLETA COCOSETTE",
+    "GALLETA BRIDGE 151G",
+    "GALLETA CLUB SOCIAL",
+    "GALLETA SALTIN NOEL",
+    "CHOC JUMBO MANI 10U",
+    "TOSTADA MAMA INES 2",
+    "MINICROISSANT LA VA",
+    "PAN BALLENA NATIPAN",
+    "AROMATICA JAIBEL 20",
+    "PAN TAJADO LA VAQUI",
+    "BOLSA VAQUITA ECOLO",
+    "ROSQUILLAS SEBA SEB",
+    "LONCHERA DIVERTIDA",
+    "SERVILLETA FAVORITA",
+    "PLATO DESECHABLE KI",
+    "LOZACREAM LIQ BLANC",
+    "DETERG LIQ FANZ 200",
+    "TOALLA COCINA FAMIL",
+    "ENJUA COLGATE 500ML",
+    "SUAVIZANTE FANZ 200",
+    "VINAGRE BLANCO LA V",
+    "JABON PROTEX 3U 330",
+    "CERA PARA PEINAR EG",
+    "AMBIENT GLADE 400ML",
+    "PAPEL ALUMINIO ZEUX",
+    "CREMA COLGATE 3U 75",
+    "JABON BARRA DERSA 3",
+    "ESPONJA ORO PLATA B",
+]
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-
 BASE_URL = "https://supermu.com"
 HEADERS = {
     "User-Agent": (
@@ -58,11 +148,6 @@ def fmt_cop(value: float | None) -> str:
 # ---------------------------------------------------------------------------
 
 def search_product(term: str) -> dict:
-    """
-    Search supermu.com for `term` and return the first result with
-    full discount info. Returns a result dict regardless of whether
-    the product or discount was found.
-    """
     result = {
         "search_term": term,
         "title": "",
@@ -145,7 +230,6 @@ def search_product(term: str) -> dict:
 # Excel export
 # ---------------------------------------------------------------------------
 
-# Palette
 C_GREEN_DARK  = "1F5C2E"
 C_GREEN_MID   = "2E7D32"
 C_GREEN_LIGHT = "E8F5E9"
@@ -172,8 +256,8 @@ def _col_widths(ws, widths: list[int]):
 def export_excel(results: list[dict], filename: str) -> None:
     wb = openpyxl.Workbook()
 
-    discounted = [r for r in results if r["has_discount"]]
-    not_found  = [r for r in results if not r["found"]]
+    discounted        = [r for r in results if r["has_discount"]]
+    not_found         = [r for r in results if not r["found"]]
     found_no_discount = [r for r in results if r["found"] and not r["has_discount"]]
 
     # ── Sheet 1: Products WITH discount (sorted by savings%) ────────────────
@@ -252,13 +336,13 @@ def export_excel(results: list[dict], filename: str) -> None:
     # ── Sheet 3: Summary ────────────────────────────────────────────────────
     ws3 = wb.create_sheet("Resumen")
     summary_data = [
-        ("Total productos buscados",    len(results)),
-        ("Encontrados",                 len(results) - len(not_found)),
-        ("No encontrados",              len(not_found)),
-        ("Con descuento / promocion",   len(discounted)),
-        ("Sin descuento",               len(found_no_discount)),
+        ("Total productos buscados",  len(results)),
+        ("Encontrados",               len(results) - len(not_found)),
+        ("No encontrados",            len(not_found)),
+        ("Con descuento / promocion", len(discounted)),
+        ("Sin descuento",             len(found_no_discount)),
         ("", ""),
-        ("Fecha del reporte",           datetime.now().strftime("%Y-%m-%d %H:%M")),
+        ("Fecha del reporte",         datetime.now().strftime("%Y-%m-%d %H:%M")),
     ]
 
     _hcell(ws3, 1, 1, "Indicador", bg=C_GREEN_DARK)
@@ -270,13 +354,68 @@ def export_excel(results: list[dict], filename: str) -> None:
         ws3.cell(row=ri, column=1, value=label).font = Font(bold=bool(label))
         ws3.cell(row=ri, column=2, value=value)
 
-    # Highlight the discount count row
-    disc_row = 6  # row index for "Con descuento" (starts at 2 + offset 3 = row 6 if 0-indexed correctly)
-    # Actually: row 2=total, 3=found, 4=not found, 5=with discount
     ws3.cell(row=5, column=1).font = Font(bold=True, color=C_ORANGE)
     ws3.cell(row=5, column=2).font = Font(bold=True, color=C_ORANGE)
 
     wb.save(filename)
+
+
+# ---------------------------------------------------------------------------
+# Email
+# ---------------------------------------------------------------------------
+
+def send_email(filename: str, discounted: list[dict], total: int) -> None:
+    if not ENABLE_EMAIL:
+        print("\n--- Email desactivado (ENABLE_EMAIL = False) ---")
+        return
+
+    msg = MIMEMultipart()
+    msg["From"]    = SENDER_EMAIL
+    msg["To"]      = RECIPIENT_EMAIL
+    msg["Subject"] = (
+        f"Supermu Reporte {datetime.now().strftime('%Y-%m-%d')} "
+        f"— {len(discounted)} descuento(s) encontrado(s)"
+    )
+
+    body_lines = [
+        f"<h2>Supermu — Reporte diario de descuentos</h2>",
+        f"<p>Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>",
+        f"<p>Productos buscados: <b>{total}</b> | Con descuento: <b>{len(discounted)}</b></p>",
+    ]
+
+    if discounted:
+        top = sorted(discounted, key=lambda x: x["savings_pct"] or 0, reverse=True)
+        body_lines.append("<h3>Productos con descuento (mayor a menor ahorro)</h3><ul>")
+        for r in top:
+            savings = f" — Ahorro: {r['savings_pct']}%" if r["savings_pct"] else ""
+            link    = f" <a href='{r['url']}'>Ver</a>" if r["url"] else ""
+            body_lines.append(
+                f"<li><b>{r['title']}</b>: {fmt_cop(r['discounted_price'])} "
+                f"(antes {fmt_cop(r['original_price'])}){savings}{link}</li>"
+            )
+        body_lines.append("</ul>")
+    else:
+        body_lines.append("<p>No se detectaron descuentos hoy.</p>")
+
+    body_lines.append("<p><i>Reporte completo adjunto en Excel.</i></p>")
+    msg.attach(MIMEText("\n".join(body_lines), "html"))
+
+    # Attach Excel file
+    with open(filename, "rb") as f:
+        part = MIMEBase("application", "octet-stream")
+        part.set_payload(f.read())
+    encoders.encode_base64(part)
+    part.add_header("Content-Disposition", f'attachment; filename="{os.path.basename(filename)}"')
+    msg.attach(part)
+
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SENDER_EMAIL, SENDER_PASSWORD)
+            server.sendmail(SENDER_EMAIL, RECIPIENT_EMAIL, msg.as_string())
+        print(f"  Email enviado a {RECIPIENT_EMAIL}")
+    except Exception as e:
+        print(f"  [ERROR] No se pudo enviar el email: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -314,9 +453,11 @@ def main():
             print(f"  {r['title'][:50]:<50} {r['discount_label']}{savings}")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"supermu_descuentos_{timestamp}.xlsx"
+    filename  = f"supermu_descuentos_{timestamp}.xlsx"
     export_excel(results, filename)
     print(f"\n  Reporte guardado: {filename}")
+
+    send_email(filename, discounted, total)
 
 
 if __name__ == "__main__":
