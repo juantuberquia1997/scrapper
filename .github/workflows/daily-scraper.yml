@@ -1,0 +1,29 @@
+name: Supermu Daily Scraper
+
+on:
+  schedule:
+    - cron: "0 12 * * *"   # 7:00 AM Colombia (UTC-5) = 12:00 UTC
+  workflow_dispatch:        # permite correrlo manualmente desde GitHub
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 openpyxl
+
+      - name: Run scraper
+        env:
+          SUPERMU_EMAIL:     ${{ secrets.SUPERMU_EMAIL }}
+          SUPERMU_PASSWORD:  ${{ secrets.SUPERMU_PASSWORD }}
+          SUPERMU_RECIPIENT: ${{ secrets.SUPERMU_RECIPIENT }}
+        run: python site_prober.py

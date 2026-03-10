@@ -24,12 +24,12 @@ from datetime import datetime
 # ---------------------------------------------------------------------------
 # Email config  ← fill these in before enabling
 # ---------------------------------------------------------------------------
-ENABLE_EMAIL    = False                        # Set True once credentials are set
+ENABLE_EMAIL    = bool(os.getenv("SUPERMU_EMAIL"))
 SMTP_SERVER     = "smtp.gmail.com"
 SMTP_PORT       = 587
-SENDER_EMAIL    = "your_email@gmail.com"
-SENDER_PASSWORD = "your_app_password"          # Gmail App Password (not your login password)
-RECIPIENT_EMAIL = "recipient@example.com"
+SENDER_EMAIL    = os.getenv("SUPERMU_EMAIL", "")
+SENDER_PASSWORD = os.getenv("SUPERMU_PASSWORD", "")
+RECIPIENT_EMAIL = os.getenv("SUPERMU_RECIPIENT", "")
 
 # ---------------------------------------------------------------------------
 # Products to track
