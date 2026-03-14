@@ -37,11 +37,11 @@ RECIPIENT_EMAIL = os.getenv("SUPERMU_RECIPIENT", "")
 PRODUCTS_TO_TRACK = [
     "CEBOLLA ROJA",
     "PAPA CRIOLLA",
-    "GRANADILLA BOLSA EC",
-    "PAPA GRUESA 1U",
+    "GRANADILLA",
+    "PAPA CAPIRA",
     "MARACUYA",
     "PLATANO VERDE",
-    "PAQUETE FRUVER LIMO",
+    "LIMON TAHITI",
     "TOMATE DE ARBOL",
     "AGUACATE PAPELILLO",
     "GUINEO",
@@ -191,7 +191,7 @@ def search_product(term: str) -> dict:
     result["found"] = True
 
     # Discount block
-    discount_tag = item.select_one(".daily-discount-tag")
+    discount_tag = item.select_one(".daily-discount-tag, .collection-discount-tag")
     if discount_tag:
         original_el = discount_tag.select_one(".discount-price-original")
         final_el    = discount_tag.select_one(".discount-price-final")
@@ -200,6 +200,19 @@ def search_product(term: str) -> dict:
         orig  = parse_price(original_el.get_text()) if original_el else None
         final = parse_price(final_el.get_text())    if final_el    else None
         label = label_el.get_text(strip=True)       if label_el    else ""
+
+        # Si no hay precio original en el tag, tomarlo del precio listado
+        if orig is None:
+            price_el = item.select_one("span[data-js-product-price] span")
+            if price_el:
+                orig = parse_price(price_el.get_text())
+
+        # Si no hay precio final, calcularlo desde el porcentaje del label
+        if final is None and orig and label:
+            pct_match = re.search(r"(\d+)", label)
+            if pct_match:
+                pct = float(pct_match.group(1))
+                final = round(orig * (1 - pct / 100))
 
         result["has_discount"]     = True
         result["original_price"]   = orig
