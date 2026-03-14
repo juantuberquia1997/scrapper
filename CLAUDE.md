@@ -18,7 +18,7 @@ Single-file script: `site_prober.py` is the only source file.
 
 **Execution flow:**
 1. `main()` iterates over `PRODUCTS_TO_TRACK`, calling `search_product()` for each
-2. `search_product()` makes one HTTP GET to `https://supermu.com/search?q=<term>`, parses the first `<product-item>` element, and extracts discount data from `.daily-discount-tag` (or falls back to `.label--sale`)
+2. `search_product()` makes one HTTP GET to `https://supermu.com/search?q=<term>`, parses the first `<product-item>` element, and extracts discount data from `.collection-discount-tag` / `.daily-discount-tag` (or falls back to `.label--sale`)
 3. After all products are checked, `export_excel()` builds a 3-sheet `.xlsx` report
 4. `send_email()` attaches the Excel and sends it via SMTP (disabled by default)
 
@@ -31,9 +31,11 @@ Single-file script: `site_prober.py` is the only source file.
 **HTML selectors used** (may break if Supermu redesigns):
 - `product-item` — container for each search result
 - `div.acciones[data-product-title]` / `[data-product-url]` — title and URL
-- `.daily-discount-tag` → `.discount-price-original`, `.discount-price-final`, `.discount-percent-label`
+- `.collection-discount-tag` / `.daily-discount-tag` → `.discount-price-original`, `.discount-price-final`, `.discount-percent-label`
+  - Si `.discount-price-original` está ausente, se usa `span[data-js-product-price] span` como precio base
+  - Si `.discount-price-final` está ausente, el precio final se calcula desde el porcentaje del label (ej. "Ahorro 20%")
 - `.label--sale` — fallback badge
-- `span[data-js-product-price] span` — listed price when no discount
+- `span[data-js-product-price] span` — precio listado cuando no hay descuento
 
 ## Automation (Windows Task Scheduler)
 
