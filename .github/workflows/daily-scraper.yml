@@ -19,7 +19,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 openpyxl
+        run: pip install requests openpyxl tqdm
 
       - name: Run scraper
         env:

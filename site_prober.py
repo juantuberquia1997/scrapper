@@ -1,12 +1,13 @@
 """
 Supermu Discount Tracker
-Searches each product in PRODUCTS_TO_TRACK, exports an Excel report,
+Fetches all products via /products.json pagination, exports an Excel report,
 and sends it by email.
+
+Usage:
+  python site_prober.py   # run the tracker
 """
-import re
 import time
 import random
-import urllib.parse
 import smtplib
 import os
 from email.mime.text import MIMEText
@@ -15,14 +16,14 @@ from email.mime.base import MIMEBase
 from email import encoders
 
 import requests
-from bs4 import BeautifulSoup
 import openpyxl
+from tqdm import tqdm
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 from datetime import datetime
 
 # ---------------------------------------------------------------------------
-# Email config  ← fill these in before enabling
+# Email config
 # ---------------------------------------------------------------------------
 ENABLE_EMAIL    = bool(os.getenv("SUPERMU_EMAIL"))
 SMTP_SERVER     = "smtp.gmail.com"
@@ -32,86 +33,38 @@ SENDER_PASSWORD = os.getenv("SUPERMU_PASSWORD", "")
 RECIPIENT_EMAIL = os.getenv("SUPERMU_RECIPIENT", "")
 
 # ---------------------------------------------------------------------------
-# Products to track
+# Frequent products — loaded from products_list.txt (same folder as script)
+# Edit that file to add/remove products without touching this script.
 # ---------------------------------------------------------------------------
-PRODUCTS_TO_TRACK = [
-    "CEBOLLA ROJA",
-    "PAPA CRIOLLA",
-    "GRANADILLA",
-    "PAPA CAPIRA",
-    "MARACUYA",
-    "PLATANO VERDE",
-    "LIMON TAHITI",
-    "TOMATE DE ARBOL",
-    "AGUACATE PAPELILLO",
-    "GUINEO",
-    "MORA",
-    "FRIJOL VERDE DESGRA",
-    "BANANO CRIOLLO",
-    "TOMATE CHONTO",
-    "FRESA JUMBO BANDEJA",
-    "ARVEJA ZENU 2U 600G",
-    "EMPANADA MAFRY 760G",
-    "ACEITE CADA DIA 300",
-    "AREPA SUPERMU 15U 1",
-    "PANELA SAN JOAQUIN",
-    "ESPARCIBLE CAMPI 50",
-    "ACEITUNAS VERDES SE",
-    "HARINA TRIGO HAZ OR",
-    "ARROZ DIANA 1000 G",
-    "ARROZ DIANA 2500G P",
-    "ATUN VANCAMPS 160G",
-    "AZUCAR PROVIDENCIA",
-    "PASTA DORIA 250G CA",
-    "PASTA DORIA 250G CO",
-    "SAL REFISAL 1000G",
-    "HARINA MAIZ PAN 100",
-    "CHOCOLATE TESALIA 2",
-    "CALDO DONA GALLINA",
-    "MANI DULCE LA VAQUI",
-    "LENTEJA ABURRA 500G",
-    "CHOCOLATES M&M 47.9",
-    "CALDO RICOSTILLA 12",
-    "LECHE LA VAQUITA 6U",
-    "CERVEZA AGUILA 6U 1",
-    "SAL DE AJO BORNEO 1",
-    "SALSA MEXICAN ESTIL",
-    "GALLETA DUCALES NOE",
-    "GALLETA WAFER NOEL",
-    "GALLETA COCOSETTE",
-    "GALLETA BRIDGE 151G",
-    "GALLETA CLUB SOCIAL",
-    "GALLETA SALTIN NOEL",
-    "CHOC JUMBO MANI 10U",
-    "TOSTADA MAMA INES 2",
-    "MINICROISSANT LA VA",
-    "PAN BALLENA NATIPAN",
-    "AROMATICA JAIBEL 20",
-    "PAN TAJADO LA VAQUI",
-    "BOLSA VAQUITA ECOLO",
-    "ROSQUILLAS SEBA SEB",
-    "LONCHERA DIVERTIDA",
-    "SERVILLETA FAVORITA",
-    "PLATO DESECHABLE KI",
-    "LOZACREAM LIQ BLANC",
-    "DETERG LIQ FANZ 200",
-    "TOALLA COCINA FAMIL",
-    "ENJUA COLGATE 500ML",
-    "SUAVIZANTE FANZ 200",
-    "VINAGRE BLANCO LA V",
-    "JABON PROTEX 3U 330",
-    "CERA PARA PEINAR EG",
-    "AMBIENT GLADE 400ML",
-    "PAPEL ALUMINIO ZEUX",
-    "CREMA COLGATE 3U 75",
-    "JABON BARRA DERSA 3",
-    "ESPONJA ORO PLATA B",
-]
+def _load_frequent_products() -> list[str]:
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "products_list.txt")
+    products = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('"') and line.endswith('",'):
+                    products.append(line[1:-2].strip())
+                elif line.startswith('"') and line.endswith('"'):
+                    products.append(line[1:-1].strip())
+    except FileNotFoundError:
+        print("  [WARN] No se encontró products_list.txt — columna Frecuente desactivada")
+    return products
+
+_FREQUENT_KEYS = [name.upper() for name in _load_frequent_products()]
+
+def is_frequent(title: str) -> bool:
+    t = title.upper()
+    return any(t.startswith(key) for key in _FREQUENT_KEYS)
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-BASE_URL = "https://supermu.com"
+BASE_URL    = "https://supermu.com"
+RETRY_WAIT  = 15
+MAX_RETRIES = 3
+PAGE_DELAY  = (0.5, 1.2)  # seconds between pages — be gentle with rate limits
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -124,119 +77,82 @@ HEADERS = {
 # Helpers
 # ---------------------------------------------------------------------------
 
-def parse_price(text: str) -> float | None:
-    """Colombian format: '.' = thousands sep, ',' = decimal sep."""
-    if not text:
-        return None
-    cleaned = re.sub(r"[^\d,.]", "", text)
-    if "," in cleaned:
-        cleaned = cleaned.replace(".", "").replace(",", ".")
-    else:
-        cleaned = cleaned.replace(".", "")
-    try:
-        return float(cleaned) if cleaned else None
-    except ValueError:
-        return None
-
-
 def fmt_cop(value: float | None) -> str:
     return f"${value:,.0f}" if value is not None else ""
 
 
 # ---------------------------------------------------------------------------
-# Search & parse
+# Scraper — paginates /products.json until empty page
 # ---------------------------------------------------------------------------
 
-def search_product(term: str) -> dict:
-    result = {
-        "search_term": term,
-        "title": "",
-        "url": "",
-        "found": False,
-        "has_discount": False,
-        "original_price": None,
-        "discounted_price": None,
-        "savings_cop": None,
-        "savings_pct": None,
-        "discount_label": "",
-    }
+def _fetch_products_page(page: int) -> list[dict]:
+    url = f"{BASE_URL}/products.json?limit=250&page={page}"
+    for attempt in range(MAX_RETRIES):
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+            if resp.status_code == 429:
+                wait = RETRY_WAIT * (attempt + 1)
+                tqdm.write(f"  [429] Rate limit — esperando {wait}s...")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp.json().get("products", [])
+        except Exception as e:
+            tqdm.write(f"  [ERROR] página {page}: {e}")
+            return []
+    return []
 
-    encoded = urllib.parse.quote(term)
-    search_url = f"{BASE_URL}/search?q={encoded}"
 
-    try:
-        resp = requests.get(search_url, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        print(f"  [ERROR] {term}: {e}")
-        return result
+def scrape_all_products() -> list[dict]:
+    results = []
+    seen_ids: set[int] = set()
+    page = 1
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    item = soup.select_one("product-item")
+    with tqdm(desc="  Páginas", unit="pág", ncols=70) as bar:
+        while True:
+            products = _fetch_products_page(page)
+            if not products:
+                break
 
-    if not item:
-        print(f"  [NOT FOUND] {term}")
-        return result
+            for p in products:
+                pid = p.get("id")
+                if pid in seen_ids:
+                    continue
+                seen_ids.add(pid)
 
-    # Title & URL
-    acciones = item.find("div", class_="acciones")
-    if acciones:
-        result["title"] = acciones.get("data-product-title", "").strip()
-        path = acciones.get("data-product-url", "").split("?")[0]
-        result["url"] = BASE_URL + path if path else ""
-    else:
-        h4 = item.find("h4")
-        result["title"] = h4.get_text(strip=True) if h4 else term
+                variant  = p.get("variants", [{}])[0]
+                price    = float(variant.get("price") or 0)
+                compare  = variant.get("compare_at_price")
+                compare  = float(compare) if compare else None
+                on_sale  = bool(compare and compare > price)
+                in_stock = bool(variant.get("available", True))
+                title    = p.get("title", "")
+                category = p.get("product_type", "")
 
-    result["found"] = True
+                results.append({
+                    "title":            title,
+                    "url":              f"{BASE_URL}/products/{p.get('handle', '')}",
+                    "category":         category,
+                    "found":            True,
+                    "in_stock":         in_stock,
+                    "frequent":         is_frequent(title),
+                    "has_discount":     on_sale,
+                    "original_price":   compare if on_sale else price,
+                    "discounted_price": price if on_sale else None,
+                    "savings_cop":      round(compare - price) if on_sale else None,
+                    "savings_pct":      round((compare - price) / compare * 100, 1) if on_sale else None,
+                    "discount_label":   f"Ahorro {round((compare - price) / compare * 100, 1)}%" if on_sale else "",
+                })
 
-    # Discount block
-    discount_tag = item.select_one(".daily-discount-tag, .collection-discount-tag")
-    if discount_tag:
-        original_el = discount_tag.select_one(".discount-price-original")
-        final_el    = discount_tag.select_one(".discount-price-final")
-        label_el    = discount_tag.select_one(".discount-percent-label")
+            bar.update(1)
+            bar.set_postfix(productos=len(results))
 
-        orig  = parse_price(original_el.get_text()) if original_el else None
-        final = parse_price(final_el.get_text())    if final_el    else None
-        label = label_el.get_text(strip=True)       if label_el    else ""
+            if len(products) < 250:
+                break
+            page += 1
+            time.sleep(random.uniform(*PAGE_DELAY))
 
-        # Si no hay precio original en el tag, tomarlo del precio listado
-        if orig is None:
-            price_el = item.select_one("span[data-js-product-price] span")
-            if price_el:
-                orig = parse_price(price_el.get_text())
-
-        # Si no hay precio final, calcularlo desde el porcentaje del label
-        if final is None and orig and label:
-            pct_match = re.search(r"(\d+)", label)
-            if pct_match:
-                pct = float(pct_match.group(1))
-                final = round(orig * (1 - pct / 100))
-
-        result["has_discount"]     = True
-        result["original_price"]   = orig
-        result["discounted_price"] = final
-        result["discount_label"]   = label
-
-        if orig and final:
-            result["savings_cop"] = orig - final
-            result["savings_pct"] = round((orig - final) / orig * 100, 1)
-    else:
-        # Fallback: check for a sale label badge
-        sale = item.select_one(".label--sale")
-        if sale and sale.get_text(strip=True):
-            result["has_discount"]   = True
-            result["discount_label"] = sale.get_text(strip=True)
-
-        # Grab listed price even without discount
-        price_el = item.select_one("span[data-js-product-price] span")
-        if price_el:
-            result["original_price"] = parse_price(price_el.get_text())
-
-    status = f"DESCUENTO: {result['discount_label']}" if result["has_discount"] else "sin descuento"
-    print(f"  {result['title'][:50]:<50} {status}")
-    return result
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -244,13 +160,14 @@ def search_product(term: str) -> dict:
 # ---------------------------------------------------------------------------
 
 C_GREEN_DARK  = "1F5C2E"
-C_GREEN_MID   = "2E7D32"
 C_GREEN_LIGHT = "E8F5E9"
 C_ORANGE      = "E65100"
 C_YELLOW      = "FFF9C4"
 C_WHITE       = "FFFFFF"
 C_GRAY        = "F5F5F5"
 C_RED_LIGHT   = "FFEBEE"
+C_BLUE_LIGHT  = "E3F2FD"
+C_BLUE_DARK   = "1565C0"
 
 
 def _hcell(ws, row, col, value, bg=C_GREEN_DARK, fg=C_WHITE, size=11):
@@ -269,106 +186,123 @@ def _col_widths(ws, widths: list[int]):
 def export_excel(results: list[dict], filename: str) -> None:
     wb = openpyxl.Workbook()
 
-    discounted        = [r for r in results if r["has_discount"]]
-    not_found         = [r for r in results if not r["found"]]
-    found_no_discount = [r for r in results if r["found"] and not r["has_discount"]]
+    disc_instock = [r for r in results if r["has_discount"] and r.get("in_stock", True)]
+    disc_nostock = [r for r in results if r["has_discount"] and not r.get("in_stock", True)]
+    not_found    = [r for r in results if not r["found"]]
+    no_discount  = [r for r in results if r["found"] and not r["has_discount"]]
 
-    # ── Sheet 1: Products WITH discount (sorted by savings%) ────────────────
+    COLS = ["Frecuente", "Producto", "Categoría", "Disponible", "Precio Original (COP)",
+            "Precio con Descuento (COP)", "Ahorro (COP)", "Ahorro (%)", "Etiqueta Promocion", "URL"]
+    WIDTHS = [11, 55, 25, 12, 24, 26, 18, 12, 22, 65]
+
+    def _write_discount_rows(ws, rows):
+        for ri, r in enumerate(sorted(rows, key=lambda x: x["savings_pct"] or 0, reverse=True), start=2):
+            in_stock = r.get("in_stock", True)
+            frequent = r.get("frequent", False)
+            bg = C_GREEN_LIGHT if (in_stock and ri % 2 == 0) else \
+                 C_WHITE       if in_stock else C_BLUE_LIGHT
+            row = ["Sí" if frequent else "", r["title"], r["category"],
+                   "Sí" if in_stock else "No",
+                   r["original_price"], r["discounted_price"],
+                   r["savings_cop"], r["savings_pct"], r["discount_label"], r["url"]]
+            for ci, val in enumerate(row, start=1):
+                cell = ws.cell(row=ri, column=ci, value=val)
+                cell.fill = PatternFill("solid", fgColor=bg)
+                cell.alignment = Alignment(vertical="center", horizontal="center" if ci == 1 else "left")
+                if ci in (5, 6, 7) and isinstance(val, (int, float)):
+                    cell.number_format = '"$"#,##0'
+                if ci == 8 and isinstance(val, (int, float)):
+                    cell.number_format = '0.0"%"'
+                    if val >= 20:
+                        cell.font = Font(bold=True, color=C_ORANGE)
+                if ci == 4 and not in_stock:
+                    cell.font = Font(bold=True, color=C_BLUE_DARK)
+
+    # ── Sheet 1: Descuento CON stock ────────────────────────────────────────
     ws1 = wb.active
     ws1.title = "Con Descuento"
-
-    h1 = ["Termino Buscado", "Producto Encontrado", "Precio Original (COP)",
-          "Precio con Descuento (COP)", "Ahorro (COP)", "Ahorro (%)",
-          "Etiqueta Promocion", "URL"]
-    w1 = [28, 50, 24, 26, 18, 12, 22, 65]
-
-    for c, h in enumerate(h1, 1):
+    for c, h in enumerate(COLS, 1):
         _hcell(ws1, 1, c, h)
-    _col_widths(ws1, w1)
+    _col_widths(ws1, WIDTHS)
     ws1.row_dimensions[1].height = 30
     ws1.freeze_panes = "A2"
+    _write_discount_rows(ws1, disc_instock)
 
-    sorted_disc = sorted(discounted, key=lambda x: x["savings_pct"] or 0, reverse=True)
-    for ri, r in enumerate(sorted_disc, start=2):
-        bg = C_GREEN_LIGHT if ri % 2 == 0 else C_WHITE
-        row = [
-            r["search_term"], r["title"],
-            r["original_price"], r["discounted_price"],
-            r["savings_cop"], r["savings_pct"],
-            r["discount_label"], r["url"],
-        ]
-        for ci, val in enumerate(row, start=1):
-            cell = ws1.cell(row=ri, column=ci, value=val)
-            cell.fill = PatternFill("solid", fgColor=bg)
-            cell.alignment = Alignment(vertical="center")
-            if ci in (3, 4, 5) and isinstance(val, (int, float)):
-                cell.number_format = '"$"#,##0'
-            if ci == 6 and isinstance(val, (int, float)):
-                cell.number_format = '0.0"%"'
-                if val >= 20:
-                    cell.font = Font(bold=True, color=C_ORANGE)
-
-    # ── Sheet 2: Full results (all products) ────────────────────────────────
-    ws2 = wb.create_sheet("Todos los Resultados")
-
-    h2 = ["#", "Termino Buscado", "Producto Encontrado", "Estado",
-          "Precio Original (COP)", "Precio Desc. (COP)", "Ahorro (%)",
-          "Etiqueta Promocion", "URL"]
-    w2 = [5, 28, 50, 18, 24, 24, 12, 22, 65]
-
-    for c, h in enumerate(h2, 1):
-        _hcell(ws2, 1, c, h)
-    _col_widths(ws2, w2)
+    # ── Sheet 2: Descuento SIN stock ────────────────────────────────────────
+    ws2 = wb.create_sheet("Descuento Sin Stock")
+    for c, h in enumerate(COLS, 1):
+        _hcell(ws2, 1, c, h, bg=C_BLUE_DARK)
+    _col_widths(ws2, WIDTHS)
     ws2.row_dimensions[1].height = 30
-    ws2.freeze_panes = "B2"
+    ws2.freeze_panes = "A2"
+    _write_discount_rows(ws2, disc_nostock)
+
+    # ── Sheet 3: All products ────────────────────────────────────────────────
+    ws3 = wb.create_sheet("Todos los Resultados")
+    h3 = ["#", "Frecuente", "Producto", "Categoría", "Disponible", "Estado",
+          "Precio Original (COP)", "Precio Desc. (COP)", "Ahorro (%)", "URL"]
+    w3 = [5, 11, 55, 25, 12, 18, 24, 24, 12, 65]
+    for c, h in enumerate(h3, 1):
+        _hcell(ws3, 1, c, h)
+    _col_widths(ws3, w3)
+    ws3.row_dimensions[1].height = 30
+    ws3.freeze_panes = "B2"
 
     for ri, r in enumerate(results, start=2):
+        in_stock = r.get("in_stock", True)
         if not r["found"]:
-            status, bg = "No encontrado", C_RED_LIGHT
-        elif r["has_discount"]:
+            status, bg = "Error al leer", C_RED_LIGHT
+        elif r["has_discount"] and in_stock:
             status, bg = "DESCUENTO", C_YELLOW
+        elif r["has_discount"] and not in_stock:
+            status, bg = "DESC. SIN STOCK", C_BLUE_LIGHT
         else:
             status, bg = "Sin descuento", C_WHITE if ri % 2 == 0 else C_GRAY
 
-        row = [
-            ri - 1, r["search_term"], r["title"], status,
-            r["original_price"], r["discounted_price"],
-            r["savings_pct"], r["discount_label"], r["url"],
-        ]
+        frequent = r.get("frequent", False)
+        row = [ri - 1, "Sí" if frequent else "", r["title"], r["category"],
+               "Sí" if in_stock else "No", status,
+               r["original_price"], r["discounted_price"],
+               r["savings_pct"], r["url"]]
         for ci, val in enumerate(row, start=1):
-            cell = ws2.cell(row=ri, column=ci, value=val)
+            cell = ws3.cell(row=ri, column=ci, value=val)
             cell.fill = PatternFill("solid", fgColor=bg)
-            cell.alignment = Alignment(vertical="center")
-            if ci in (5, 6) and isinstance(val, (int, float)):
+            cell.alignment = Alignment(vertical="center", horizontal="center" if ci == 2 else "left")
+            if ci in (7, 8) and isinstance(val, (int, float)):
                 cell.number_format = '"$"#,##0'
-            if ci == 7 and isinstance(val, (int, float)):
+            if ci == 9 and isinstance(val, (int, float)):
                 cell.number_format = '0.0"%"'
-            if status == "DESCUENTO" and ci == 4:
-                cell.font = Font(bold=True, color=C_ORANGE)
+            if ci == 6 and "DESCUENTO" in status:
+                cell.font = Font(bold=True, color=C_ORANGE if in_stock else C_BLUE_DARK)
+            if ci == 5 and not in_stock:
+                cell.font = Font(bold=True, color=C_BLUE_DARK)
 
-    # ── Sheet 3: Summary ────────────────────────────────────────────────────
-    ws3 = wb.create_sheet("Resumen")
+    # ── Sheet 4: Summary ─────────────────────────────────────────────────────
+    ws4 = wb.create_sheet("Resumen")
     summary_data = [
-        ("Total productos buscados",  len(results)),
-        ("Encontrados",               len(results) - len(not_found)),
-        ("No encontrados",            len(not_found)),
-        ("Con descuento / promocion", len(discounted)),
-        ("Sin descuento",             len(found_no_discount)),
+        ("Total productos analizados",      len(results)),
+        ("Leídos correctamente",            len(results) - len(not_found)),
+        ("Errores al leer",                 len(not_found)),
+        ("Con descuento (con stock)",        len(disc_instock)),
+        ("Con descuento (sin stock)",        len(disc_nostock)),
+        ("Sin descuento",                   len(no_discount)),
         ("", ""),
-        ("Fecha del reporte",         datetime.now().strftime("%Y-%m-%d %H:%M")),
+        ("Fecha del reporte",               datetime.now().strftime("%Y-%m-%d %H:%M")),
     ]
 
-    _hcell(ws3, 1, 1, "Indicador", bg=C_GREEN_DARK)
-    _hcell(ws3, 1, 2, "Valor",     bg=C_GREEN_DARK)
-    ws3.column_dimensions["A"].width = 35
-    ws3.column_dimensions["B"].width = 20
+    _hcell(ws4, 1, 1, "Indicador", bg=C_GREEN_DARK)
+    _hcell(ws4, 1, 2, "Valor",     bg=C_GREEN_DARK)
+    ws4.column_dimensions["A"].width = 38
+    ws4.column_dimensions["B"].width = 20
 
     for ri, (label, value) in enumerate(summary_data, start=2):
-        ws3.cell(row=ri, column=1, value=label).font = Font(bold=bool(label))
-        ws3.cell(row=ri, column=2, value=value)
+        ws4.cell(row=ri, column=1, value=label).font = Font(bold=bool(label))
+        ws4.cell(row=ri, column=2, value=value)
 
-    ws3.cell(row=5, column=1).font = Font(bold=True, color=C_ORANGE)
-    ws3.cell(row=5, column=2).font = Font(bold=True, color=C_ORANGE)
+    ws4.cell(row=4, column=1).font = Font(bold=True, color=C_ORANGE)
+    ws4.cell(row=4, column=2).font = Font(bold=True, color=C_ORANGE)
+    ws4.cell(row=5, column=1).font = Font(bold=True, color=C_BLUE_DARK)
+    ws4.cell(row=5, column=2).font = Font(bold=True, color=C_BLUE_DARK)
 
     wb.save(filename)
 
@@ -391,9 +325,9 @@ def send_email(filename: str, discounted: list[dict], total: int) -> None:
     )
 
     body_lines = [
-        f"<h2>Supermu — Reporte diario de descuentos</h2>",
+        "<h2>Supermu — Reporte diario de descuentos</h2>",
         f"<p>Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>",
-        f"<p>Productos buscados: <b>{total}</b> | Con descuento: <b>{len(discounted)}</b></p>",
+        f"<p>Productos analizados: <b>{total}</b> | Con descuento: <b>{len(discounted)}</b></p>",
     ]
 
     if discounted:
@@ -413,7 +347,6 @@ def send_email(filename: str, discounted: list[dict], total: int) -> None:
     body_lines.append("<p><i>Reporte completo adjunto en Excel.</i></p>")
     msg.attach(MIMEText("\n".join(body_lines), "html"))
 
-    # Attach Excel file
     with open(filename, "rb") as f:
         part = MIMEBase("application", "octet-stream")
         part.set_payload(f.read())
@@ -436,38 +369,33 @@ def send_email(filename: str, discounted: list[dict], total: int) -> None:
 # ---------------------------------------------------------------------------
 
 def main():
-    total = len(PRODUCTS_TO_TRACK)
-    print(f"Supermu Discount Tracker")
-    print(f"Buscando {total} productos...\n")
+    print("\nSupermu Discount Tracker")
+    print("Fuente: /products.json (paginado)\n")
 
-    results = []
-    for i, term in enumerate(PRODUCTS_TO_TRACK, start=1):
-        print(f"[{i:>2}/{total}] {term}")
-        result = search_product(term)
-        results.append(result)
-        time.sleep(random.uniform(0.8, 1.5))
+    all_results = scrape_all_products()
 
-    discounted = [r for r in results if r["has_discount"]]
-    not_found  = [r for r in results if not r["found"]]
+    total        = len(all_results)
+    discounted   = [r for r in all_results if r["has_discount"]]
+    disc_instock = [r for r in discounted if r.get("in_stock", True)]
+    disc_nostock = [r for r in discounted if not r.get("in_stock", True)]
+    not_found    = [r for r in all_results if not r["found"]]
 
     print(f"\n{'='*55}")
     print(f"  RESUMEN")
     print(f"{'='*55}")
-    print(f"  Buscados:          {total}")
-    print(f"  Encontrados:       {total - len(not_found)}")
-    print(f"  No encontrados:    {len(not_found)}")
-    print(f"  Con descuento:     {len(discounted)}")
+    print(f"  Productos únicos:       {total}")
+    print(f"  Con descuento + stock:  {len(disc_instock)}")
+    print(f"  Con descuento sin stock:{len(disc_nostock)}")
+    print(f"  Errores:                {len(not_found)}")
 
     if discounted:
-        print(f"\n  --- Productos con descuento ---")
-        top = sorted(discounted, key=lambda x: x["savings_pct"] or 0, reverse=True)
-        for r in top:
-            savings = f"  Ahorro: {r['savings_pct']}%" if r["savings_pct"] else ""
-            print(f"  {r['title'][:50]:<50} {r['discount_label']}{savings}")
+        print(f"\n  --- Top descuentos ---")
+        for r in sorted(discounted, key=lambda x: x["savings_pct"] or 0, reverse=True)[:10]:
+            print(f"  {r['title'][:45]:<45} {r['discount_label']}")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename  = f"supermu_descuentos_{timestamp}.xlsx"
-    export_excel(results, filename)
+    export_excel(all_results, filename)
     print(f"\n  Reporte guardado: {filename}")
 
     send_email(filename, discounted, total)

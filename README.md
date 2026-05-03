@@ -1,6 +1,6 @@
 # Supermu Discount Tracker
 
-Scrapes [supermu.com](https://supermu.com) and reports which products from your tracking list have active discounts or promotions. Results are exported to an Excel file.
+Automatically discovers all products from [supermu.com](https://supermu.com) via Shopify sitemaps, fetches prices through the Shopify JSON API, and exports a discount report to Excel.
 
 ---
 
@@ -8,70 +8,118 @@ Scrapes [supermu.com](https://supermu.com) and reports which products from your 
 
 | File | Purpose |
 |---|---|
-| `site_prober.py` | **Main script** — run this. Contiene la lista de productos y toda la lógica |
-
----
-
-## How to Run
-
-```bash
-python site_prober.py
-```
-
-The script will search each product, print progress in the terminal, and save an Excel report when done.
-
----
-
-## How to Add or Remove Products
-
-Open `site_prober.py` and edit the `PRODUCTS_TO_TRACK` list al inicio del archivo:
-
-```python
-PRODUCTS_TO_TRACK = [
-    "CEBOLLA ROJA",
-    "ARROZ DIANA 1000 G",
-    # add or remove products here
-]
-```
-
-> Use the product name as it appears on the Supermu website for best results.
-
----
-
-## Output
-
-Each run generates a new Excel file named:
-
-```
-supermu_descuentos_YYYYMMDD_HHMMSS.xlsx
-```
-
-The file has 3 sheets:
-
-| Sheet | Content |
-|---|---|
-| **Con Descuento** | Only products with active discounts, sorted by highest savings % |
-| **Todos los Resultados** | All searched products with status (discount / no discount / not found) |
-| **Resumen** | Summary counts |
+| `site_prober.py` | Main script — all logic lives here |
+| `product_frequents.md` | List of products you buy frequently — edit this to update the "Frecuente" column in the report |
 
 ---
 
 ## Requirements
 
-Install dependencies once:
-
 ```bash
-pip install requests beautifulsoup4 openpyxl
+pip install requests openpyxl tqdm
 ```
 
 ---
 
-## How It Detects Discounts
+## How to Run
 
-The script parses the static HTML returned by the Supermu search page. For each product it checks:
+### 1. Discover available collection handles
+```bash
+python site_prober.py --list-collections
+```
 
-1. `.collection-discount-tag` / `.daily-discount-tag` — primary discount block
-   - Extracts `.discount-price-original`, `.discount-price-final`, `.discount-percent-label`
-   - If the original price is missing from the tag, it falls back to `span[data-js-product-price] span`
-   - If the final price is missing, it calculates it from the percentage in the label (e.g. "Ahorro 20%")
-2. `.label--sale` — fallback badge (records the label only, no price data)
+### 2. Match your frequent products to collections
+```bash
+python site_prober.py --match-collections
+```
+Prints which collection handles cover the products in `product_frequents.md`, and generates a ready-to-paste `COLLECTIONS_TO_TRACK` block.
+
+### 3. Set the collections to track
+Open `site_prober.py` and fill in `COLLECTIONS_TO_TRACK`:
+
+```python
+COLLECTIONS_TO_TRACK = [
+    "frutas-y-verduras",
+    "carnes",
+    "lacteos",
+    "aseo-del-hogar",
+]
+```
+
+> Leave it empty to scan the entire catalog (~7000+ products, takes longer).
+
+### 4. Run the tracker
+```bash
+python site_prober.py
+```
+
+---
+
+## Output
+
+Each run saves a new Excel file:
+
+```
+supermu_descuentos_YYYYMMDD_HHMMSS.xlsx
+```
+
+| Sheet | Content |
+|---|---|
+| **Con Descuento** | Products with active discounts **and** stock available, sorted by highest savings % |
+| **Descuento Sin Stock** | Products with active discounts but currently out of stock |
+| **Todos los Resultados** | Full catalog with status, availability, and frequent flag |
+| **Resumen** | Summary counts — discounts with/without stock, errors, totals |
+
+### Columns
+
+| Column | Description |
+|---|---|
+| Frecuente | `Sí` if the product is in `product_frequents.md` |
+| Disponible | `Sí` / `No` — whether the product is in stock |
+| Precio Original | Listed price (or compare-at price if on sale) |
+| Precio con Descuento | Sale price |
+| Ahorro (COP) / Ahorro (%) | Absolute and relative savings |
+
+---
+
+## How to Manage Frequent Products
+
+Edit `product_frequents.md` — add or remove product names from the list. The script reads this file on every run. No code changes needed.
+
+The matching uses `startswith` against the product's real title, so partial names work:
+
+```
+"GALLETA DUCALES NOE"  →  matches  →  "GALLETA DUCALES NOEL 200G"  ✅
+```
+
+---
+
+## How Discounts Are Detected
+
+The script uses the **Shopify product JSON API** (`/products/{handle}.json` or via collection API). A product is on sale when:
+
+```
+variant.compare_at_price > variant.price
+```
+
+This is more reliable than HTML scraping — no CSS selectors that break on redesigns.
+
+---
+
+## Automation (Windows Task Scheduler)
+
+```cmd
+schtasks /create /tn "SupermuScraper" /tr "python C:\path\to\site_prober.py" /sc daily /st 07:00
+```
+
+---
+
+## Email Notifications
+
+Set these environment variables to receive the Excel report by email daily:
+
+```bash
+SUPERMU_EMAIL=tu@gmail.com
+SUPERMU_PASSWORD=tu_app_password
+SUPERMU_RECIPIENT=destinatario@email.com
+```
